@@ -640,13 +640,13 @@ docs/screenshots/
 
 ## 1. Application Dashboard
 
-![Application Dashboard](docs/screenshots/Screenshot1-Application%20Dashboard .png)
+![Application Dashboard](docs/screenshots/Screenshot1-Application%20Dashboard%20.png)
 
 ---
 
 ## 2. HLD Document Upload
 
-![HLD Document Upload](docs/screenshots/Screenshot2-HLD%20Document%20Upload .png)
+![HLD Document Upload](docs/screenshots/Screenshot2-HLD%20Document%20Upload%20.png)
 
 ---
 
