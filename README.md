@@ -664,7 +664,7 @@ docs/screenshots/
 
 ## 5. Extracted Entities
 
-![Extracted Entities](docs/screenshots/Screenshot5-Extracted%20Entities .png)
+![Extracted Entities](docs/screenshots/Screenshot5-Extracted%20Entities%20.png)
 
 ---
 
@@ -700,7 +700,7 @@ docs/screenshots/
 
 ## 11. API Backend Evidence
 
-![API Backend Evidence](docs/screenshots/Screenshot11-%20API%20Backend%20Evidence.png)
+![API Backend Evidence](docs/screenshots/Screenshot11-API%20Backend%20Evidence.png)
 
 ---
 
