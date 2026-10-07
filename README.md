@@ -1299,7 +1299,7 @@ Your repository should match these names **exactly**, including spaces:
 docs/
 │
 ├── Architecture.png
-├── videos.mp3
+├── Video.mp4
 │
 └── screenshots/
     ├── Screenshot1-Application Dashboard.png
@@ -1315,28 +1315,3 @@ docs/
     └── Screenshot11-API Backend Evidence.png
 ````
 
-And **do not forget these two corrections from your old README**:
-
-```text
-Qwen3
-```
-
-should be replaced with:
-
-```text
-Llama 3.2
-```
-
-and:
-
-```text
-ollama pull qwen3:8b
-```
-
-should be:
-
-```text
-ollama pull llama3.2
-```
-
-Your README will then be consistent with your actual working implementation.
