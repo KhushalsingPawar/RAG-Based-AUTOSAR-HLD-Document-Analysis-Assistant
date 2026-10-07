@@ -1,0 +1,12 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+vector_db/
+uploads/
+.streamlit/secrets.toml
+.vscode/
+.idea/
