@@ -1,957 +1,433 @@
+
+import sys
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import streamlit as st
-import requests
 import pandas as pd
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-BACKEND_URL = "http://127.0.0.1:8000"
-
-
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-
+from frontend.components.api_client import APIClient, BACKEND_URL
+from frontend.components.ui_helpers import inject_custom_css, render_citation
+from frontend.components.auth_page import render_auth_page, render_user_sidebar_widget
 st.set_page_config(
-    page_title="AUTOSAR HLD Assistant",
+    page_title="AUTOSAR HLD Document Analysis Assistant",
     page_icon="🚗",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+inject_custom_css()
+
+# ── Authentication Gate ──────────────────────────────────────────────────────
+# If not logged in, render the login/register page and stop.
+if not render_auth_page():
+    st.stop()
+
+# Build a token-aware API client from session state
+client = APIClient(
+    base_url=BACKEND_URL,
+    token=st.session_state.get("auth_token"),
 )
 
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-if "document_id" not in st.session_state:
-    st.session_state.document_id = None
-
-if "filename" not in st.session_state:
-    st.session_state.filename = None
-
-if "uploaded_documents" not in st.session_state:
-    st.session_state.uploaded_documents = []
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-st.title("🚗 AUTOSAR HLD Document Analysis Assistant")
-
+# Header (only shown after login)
+st.markdown('<div class="main-header">🚗 AUTOSAR HLD Document Analysis Assistant</div>', unsafe_allow_html=True)
 st.markdown(
-    """
-AI-assisted analysis of AUTOSAR High-Level Design documents.
-
-**Upload → Extract → Search → Analyze → Validate → Compare**
-"""
+    '<div class="sub-header">Local-first AI Platform for Automotive Architecture Ingestion, Grounded RAG Tracing, and Verification</div>',
+    unsafe_allow_html=True,
 )
 
-st.divider()
+# Sidebar: System Context & Project Selector
+st.sidebar.title("Configuration & Context")
 
+health_status = client.get_health()
+if health_status.get("status") == "Healthy":
+    st.sidebar.success(f"🟢 Backend: Online (v{health_status.get('version', '1.0')})")
+    ollama_info = health_status.get("ollama_service", "Unknown")
+    if "Ready" in ollama_info:
+        st.sidebar.info(f"🤖 LLM: {health_status.get('ollama_model')} ({ollama_info})")
+    else:
+        st.sidebar.warning(f"🤖 LLM: {ollama_info}")
+    st.sidebar.caption(f"💾 Vector Store: {health_status.get('vector_store')}")
+else:
+    st.sidebar.error("🔴 Backend Service Offline. Ensure FastAPI is running on port 8000.")
 
-# ============================================================
-# SIDEBAR
-# ============================================================
+st.sidebar.divider()
 
-st.sidebar.header("Navigation")
+# Logged-in user info + logout
+render_user_sidebar_widget()
 
-page = st.sidebar.radio(
-    "Select Module",
+# Project Selection
+projects = client.get_projects()
+if not projects:
+    project_options = {1: "Default Workspace"}
+    selected_project_id = 1
+else:
+    project_options = {p["id"]: f"{p['name']} ({p.get('vehicle_program', 'General')})" for p in projects}
+    selected_project_id = st.sidebar.selectbox(
+        "Active Project Context",
+        options=list(project_options.keys()),
+        format_func=lambda x: project_options[x],
+    )
+
+with st.sidebar.expander("➕ Create New Project"):
+    new_proj_name = st.text_input("Project Name", placeholder="e.g. Battery Management", key="sidebar_new_proj_name")
+    new_proj_prog = st.text_input("Vehicle Program", placeholder="e.g. Tata Curvv EV", key="sidebar_new_proj_prog")
+    new_proj_desc = st.text_area("Description", placeholder="Architecture tracing for BMS", key="sidebar_new_proj_desc")
+    if st.button("Create Project", use_container_width=True, key="sidebar_create_proj_btn"):
+        if not new_proj_name.strip():
+            st.error("Please enter a project name.")
+        else:
+            p_res = client.create_project(
+                name=new_proj_name.strip(),
+                vehicle_program=new_proj_prog.strip() or "General Automotive",
+                description=new_proj_desc.strip(),
+            )
+            if "id" in p_res:
+                st.sidebar.success(f"Project '{new_proj_name}' created!")
+                st.rerun()
+            else:
+                st.sidebar.error(f"Error: {p_res.get('detail', 'Failed to create project')}")
+
+documents = client.get_documents(project_id=selected_project_id)
+
+st.sidebar.divider()
+st.sidebar.markdown("### Quick Demo Setup")
+st.sidebar.caption("Load synthetic AUTOSAR HLD documents into the active project:")
+col_demo1, col_demo2 = st.sidebar.columns(2)
+with col_demo1:
+    if st.button("Load v2.0 (Base)", use_container_width=True):
+        with st.spinner("Ingesting v2.0..."):
+            res = client.load_sample_hld("Brake_System_HLD_v2.0.pdf", selected_project_id, "v2.0.0")
+            st.sidebar.success("v2.0 Indexed!")
+            st.rerun()
+with col_demo2:
+    if st.button("Load v2.1 (Target)", use_container_width=True):
+        with st.spinner("Ingesting v2.1..."):
+            res = client.load_sample_hld("Brake_System_HLD_v2.1.pdf", selected_project_id, "v2.1.0")
+            st.sidebar.success("v2.1 Indexed!")
+            st.rerun()
+
+# Tabs
+tab_dash, tab_ingest, tab_rag, tab_entities, tab_diff, tab_validate = st.tabs(
     [
-        "📄 Upload HLD",
-        "📊 Document Summary",
-        "🧩 AUTOSAR Entities",
-        "🔍 RAG Question Answering",
-        "⚖️ Compare HLD Versions",
-        "⚠️ Validation"
+        "📊 Dashboard",
+        "📥 HLD Ingestion",
+        "💬 Semantic RAG Assistant",
+        "🧩 Entity Explorer",
+        "🔄 Revision Diff",
+        "⚠️ Architecture Validation",
     ]
 )
 
-
-# ============================================================
-# HELPER FUNCTIONS
-# ============================================================
-
-def upload_document(uploaded_file):
-
-    files = {
-        "file": (
-            uploaded_file.name,
-            uploaded_file.getvalue(),
-            "application/pdf"
-        )
-    }
-
-    try:
-
-        response = requests.post(
-            f"{BACKEND_URL}/api/documents/upload",
-            files=files,
-            timeout=180
-        )
-
-        response.raise_for_status()
-
-        return response.json()
-
-    except requests.exceptions.ConnectionError:
-
-        st.error(
-            "Backend is not running. "
-            "Start FastAPI using: "
-            "`uvicorn app.main:app --reload`"
-        )
-
-        return None
-
-    except requests.exceptions.RequestException as error:
-
-        st.error(
-            f"Upload failed: {error}"
-        )
-
-        return None
-
-
-def get_document_report(document_id):
-
-    try:
-
-        response = requests.get(
-            f"{BACKEND_URL}/api/documents/report",
-            params={
-                "document_id": document_id
-            },
-            timeout=60
-        )
-
-        response.raise_for_status()
-
-        return response.json()
-
-    except requests.exceptions.RequestException:
-
-        return None
-
-
-def ask_question(
-    question,
-    top_k=5,
-    document_id=None
-):
-
-    payload = {
-        "question": question,
-        "top_k": top_k
-    }
-
-    if document_id:
-
-        payload["document_id"] = document_id
-
-    try:
-
-        response = requests.post(
-            f"{BACKEND_URL}/api/documents/ask",
-            json=payload,
-            timeout=180
-        )
-
-        response.raise_for_status()
-
-        return response.json()
-
-    except requests.exceptions.RequestException as error:
-
-        st.error(
-            f"Question answering failed: {error}"
-        )
-
-        return None
-
-
-def compare_documents(
-    old_document_id,
-    new_document_id
-):
-
-    payload = {
-        "old_document_id": old_document_id,
-        "new_document_id": new_document_id
-    }
-
-    try:
-
-        response = requests.post(
-            f"{BACKEND_URL}/api/documents/compare",
-            json=payload,
-            timeout=60
-        )
-
-        response.raise_for_status()
-
-        return response.json()
-
-    except requests.exceptions.RequestException as error:
-
-        st.error(
-            f"Comparison failed: {error}"
-        )
-
-        return None
-
-
-def validate_document(document_id):
-
-    try:
-
-        response = requests.get(
-            f"{BACKEND_URL}/api/documents/validate/{document_id}",
-            timeout=60
-        )
-
-        response.raise_for_status()
-
-        return response.json()
-
-    except requests.exceptions.RequestException as error:
-
-        st.error(
-            f"Validation failed: {error}"
-        )
-
-        return None
-
-
-# ============================================================
-# PAGE 1 — UPLOAD
-# ============================================================
-
-if page == "📄 Upload HLD":
-
-    st.header("📄 Upload AUTOSAR HLD")
-
-    uploaded_file = st.file_uploader(
-        "Upload an HLD PDF",
-        type=["pdf"]
-    )
-
-    if uploaded_file:
-
-        st.info(
-            f"Selected file: {uploaded_file.name}"
-        )
-
-        if st.button(
-            "🚀 Analyze HLD",
-            type="primary"
-        ):
-
-            with st.spinner(
-                "Processing HLD document..."
-            ):
-
-                result = upload_document(
-                    uploaded_file
-                )
-
-            if result:
-
-                document_id = result.get(
-                    "document_id"
-                )
-
-                st.session_state.document_id = (
-                    document_id
-                )
-
-                st.session_state.filename = (
-                    uploaded_file.name
-                )
-
-                document_record = {
-                    "document_id": document_id,
-                    "filename": uploaded_file.name
+# ----------------- TAB 1: DASHBOARD -----------------
+with tab_dash:
+    st.subheader("Architectural Knowledge Base Overview")
+    
+    total_docs = len(documents)
+    all_entities = client.get_entities(project_id=selected_project_id)
+    swc_count = sum(1 for e in all_entities if e["entity_type"] == "Component")
+    port_count = sum(1 for e in all_entities if e["entity_type"] == "Port")
+    signal_count = sum(1 for e in all_entities if e["entity_type"] == "Signal")
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Indexed HLDs", total_docs)
+    m2.metric("Software Components (SWC)", swc_count)
+    m3.metric("AUTOSAR Ports", port_count)
+    m4.metric("Traced Signals", signal_count)
+    m5.metric("Total Cataloged Entities", len(all_entities))
+
+    st.markdown("#### Document Specifications")
+    if documents:
+        doc_df = pd.DataFrame(
+            [
+                {
+                    "ID": d["id"],
+                    "Filename": d["filename"],
+                    "Version": d["version"],
+                    "Total Pages": d["total_pages"],
+                    "File Size (KB)": d["file_size_kb"],
+                    "Status": d["status"],
+                    "Ingested Date": d["uploaded_at"][:10],
                 }
-
-                if document_record not in st.session_state.uploaded_documents:
-
-                    st.session_state.uploaded_documents.append(
-                        document_record
-                    )
-
-                st.success(
-                    "HLD uploaded and analyzed successfully!"
-                )
-
-                st.subheader("Processing Result")
-
-                # Get nested processing information
-                chunks_info = result.get("chunks", {})
-                embeddings_info = result.get("embeddings", {})
-
-                total_chunks = chunks_info.get(
-                    "total_chunks",
-                    embeddings_info.get("total_chunks", 0)
-                )
-
-                embedding_dimension = embeddings_info.get(
-                    "embedding_dimension",
-                    0
-                )
-
-                embedding_model = embeddings_info.get(
-                    "embedding_model",
-                    "Unknown"
-                )
-
-                col1, col2, col3, col4 = st.columns(4)
-
-                with col1:
-
-                    st.metric(
-                        "Pages",
-                        result.get(
-                            "total_pages",
-                            0
-                        )
-                    )
-
-                with col2:
-
-                    st.metric(
-                        "Chunks",
-                        total_chunks
-                    )
-
-                with col3:
-
-                    st.metric(
-                        "Embedding Dimension",
-                        embedding_dimension
-                    )
-
-                with col4:
-
-                    st.metric(
-                        "Entities",
-                        sum(
-                            len(value)
-                            for value in result.get(
-                                "entities",
-                                {}
-                            ).values()
-                            if isinstance(value, list)
-                        )
-                    )
-
-                st.caption(
-                    f"Embedding Model: `{embedding_model}`"
-                )
-
-                st.success(
-                    "HLD processing pipeline completed successfully."
-                )
-
-                st.code(
-                    document_id
-                )
-
-                st.info(
-                    "Save this Document ID for comparison and debugging."
-                )
-
-# ============================================================
-# PAGE 2 — DOCUMENT SUMMARY
-# ============================================================
-
-elif page == "📊 Document Summary":
-
-    st.header("📊 Document Summary")
-
-    if not st.session_state.document_id:
-
-        st.warning(
-            "Upload an HLD document first."
+                for d in documents
+            ]
         )
-
+        st.dataframe(doc_df, use_container_width=True)
     else:
+        st.info("👋 Welcome! You don't have any HLD specifications in this project yet. Use the 'HLD Ingestion' tab to upload your files, or click 'Load v2.0' in the sidebar.")
 
-        report = get_document_report(
-            st.session_state.document_id
-        )
+# ----------------- TAB 2: INGESTION -----------------
+with tab_ingest:
+    st.subheader("Ingest New High-Level Design (HLD) Specification")
 
-        if report:
+    col_up1, col_up2 = st.columns([2, 1])
+    with col_up1:
+        uploaded_file = st.file_uploader("Upload AUTOSAR HLD Specification (PDF)", type=["pdf"])
+    with col_up2:
+        doc_version = st.text_input("Specification Version Tag", value="v1.0.0")
 
-            st.subheader(
-                report.get(
-                    "filename",
-                    "Unknown document"
-                )
-            )
-
-            summary = report.get(
-                "summary",
-                {}
-            )
-
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-
-                st.metric(
-                    "Pages",
-                    report.get(
-                        "total_pages",
-                        0
-                    )
-                )
-
-                st.metric(
-                    "Components",
-                    summary.get(
-                        "software_components",
-                        0
-                    )
-                )
-
-            with col2:
-
-                st.metric(
-                    "Interfaces",
-                    summary.get(
-                        "interfaces",
-                        0
-                    )
-                )
-
-                st.metric(
-                    "Ports",
-                    summary.get(
-                        "ports",
-                        0
-                    )
-                )
-
-            with col3:
-
-                st.metric(
-                    "Signals",
-                    summary.get(
-                        "signals",
-                        0
-                    )
-                )
-
-                st.metric(
-                    "Dependencies",
-                    summary.get(
-                        "dependencies",
-                        0
-                    )
-                )
-
-            st.metric(
-                "Functional Flows",
-                summary.get(
-                    "functional_flows",
-                    0
-                )
-            )
-
-
-# ============================================================
-# PAGE 3 — AUTOSAR ENTITIES
-# ============================================================
-
-elif page == "🧩 AUTOSAR Entities":
-
-    st.header("🧩 AUTOSAR Entities")
-
-    if not st.session_state.document_id:
-
-        st.warning(
-            "Upload an HLD document first."
-        )
-
-    else:
-
-        report = get_document_report(
-            st.session_state.document_id
-        )
-
-        if report:
-
-            entities = report.get(
-                "entities",
-                {}
-            )
-
-            entity_type = st.selectbox(
-                "Select entity type",
-                [
-                    "software_components",
-                    "interfaces",
-                    "ports",
-                    "signals",
-                    "dependencies",
-                    "functional_flows"
-                ]
-            )
-
-            entity_data = entities.get(
-                entity_type,
-                []
-            )
-
-            st.write(
-                f"Found **{len(entity_data)}** "
-                f"{entity_type.replace('_', ' ')}."
-            )
-
-            if entity_data:
-
-                dataframe = pd.DataFrame(
-                    entity_data
-                )
-
-                st.dataframe(
-                    dataframe,
-                    use_container_width=True
-                )
-
+    if uploaded_file and st.button("Ingest & Index PDF", type="primary"):
+        with st.spinner("Extracting text, chunking, extracting AUTOSAR entities, and generating vector embeddings..."):
+            file_bytes = uploaded_file.read()
+            res = client.upload_pdf(file_bytes, uploaded_file.name, selected_project_id, doc_version)
+            if "document_id" in res:
+                st.success(f"Successfully processed {uploaded_file.name} (Document ID: {res['document_id']})")
+                st.rerun()
             else:
+                st.error(f"Ingestion failed: {res.get('detail', 'Unknown error')}")
 
-                st.info(
-                    "No entities found."
-                )
-
-
-# ============================================================
-# PAGE 4 — RAG QUESTION ANSWERING
-# ============================================================
-
-elif page == "🔍 RAG Question Answering":
-
-    st.header("🔍 Ask Questions About HLD")
-
-    if not st.session_state.document_id:
-
-        st.warning(
-            "Upload an HLD document first."
-        )
-
-    else:
-
-        question = st.text_area(
-            "Enter your AUTOSAR architecture question",
-            placeholder=(
-                "Example: Which component depends "
-                "on SpeedSensor?"
+    # --- DELETE & MANAGE DOCUMENTS SECTION ---
+    st.divider()
+    st.subheader("🗑️ Delete & Manage Ingested Documents")
+    st.caption("Permanently delete unneeded HLD specifications, their extracted entities, and vector embeddings from your workspace.")
+    if documents:
+        col_del_select, col_del_btn = st.columns([3, 1])
+        with col_del_select:
+            doc_to_delete = st.selectbox(
+                "Select Document to Delete",
+                options=documents,
+                format_func=lambda d: f"{d['filename']} ({d['version']}) — ID: {d['id']} | {d['total_pages']} pages",
+                key="doc_delete_selector",
             )
-        )
+        with col_del_btn:
+            st.write("")
+            st.write("")
+            confirm_del = st.checkbox("Confirm Deletion", key="confirm_doc_delete")
 
-        top_k = st.slider(
-            "Number of retrieved sources",
-            min_value=1,
-            max_value=10,
-            value=5
-        )
-
-        if st.button(
-            "🔍 Ask Question",
-            type="primary"
-        ):
-
-            if not question.strip():
-
-                st.warning(
-                    "Please enter a question."
-                )
-
-            else:
-
-                with st.spinner(
-                    "Searching HLD and generating answer..."
-                ):
-
-                    result = ask_question(
-                        question=question,
-                        top_k=top_k,
-                        document_id=(
-                            st.session_state.document_id
-                        )
-                    )
-
-                if result:
-
-                    st.subheader(
-                        "Answer"
-                    )
-
-                    st.success(
-                        result.get(
-                            "answer",
-                            "No answer returned."
-                        )
-                    )
-
-                    st.subheader(
-                        "📚 Citations"
-                    )
-
-                    citations = result.get(
-                        "citations",
-                        []
-                    )
-
-                    if citations:
-
-                        for citation in citations:
-
-                            st.markdown(
-                                f"- {citation}"
-                            )
-
+        if doc_to_delete:
+            st.caption(f"⚠️ Selected for removal: **{doc_to_delete['filename']}** (ID: {doc_to_delete['id']}, Version: {doc_to_delete['version']})")
+            if st.button("🗑️ Delete Selected Document", type="secondary", disabled=not confirm_del):
+                with st.spinner(f"Deleting '{doc_to_delete['filename']}'..."):
+                    del_res = client.delete_document(doc_to_delete["id"])
+                    if "deleted_id" in del_res:
+                        st.success(f"✅ {del_res.get('message', 'Document deleted successfully.')}")
+                        st.rerun()
                     else:
+                        st.error(f"Failed to delete document: {del_res.get('detail', 'Unknown error')}")
+    else:
+        st.info("No documents are currently ingested in this project.")
 
-                        st.info(
-                            "No citations available."
-                        )
+    st.divider()
+    st.subheader("Chunk Inspector")
+    if documents:
+        doc_to_inspect = st.selectbox(
+            "Select Document to Inspect Chunks",
+            options=documents,
+            format_func=lambda d: f"{d['filename']} ({d['version']})",
+        )
+        if doc_to_inspect:
+            chunks = client.get_document_chunks(doc_to_inspect["id"])
+            st.caption(f"Total contextual chunks: {len(chunks)}")
+            for c in chunks[:10]:
+                with st.expander(f"Chunk #{c['chunk_index']} | Page {c['page_number']} | {c['section_title']}"):
+                    st.text(c["content"])
+    else:
+        st.info("No documents available to inspect chunks.")
 
-                    with st.expander(
-                        "View Retrieved Sources"
-                    ):
+# ----------------- TAB 3: SEMANTIC RAG -----------------
+with tab_rag:
+    st.subheader("Grounded Architecture Question Answering (RAG)")
+    st.caption("Ask natural language questions regarding signal flow, ports, interfaces, and component mappings.")
 
-                        sources = result.get(
-                            "sources",
-                            []
-                        )
+    if not documents:
+        st.info("ℹ️ No documents ingested in this project yet. Ingest an HLD specification in the 'HLD Ingestion' tab or load sample documents in the sidebar to ask architectural questions.")
 
-                        for source in sources:
+    # Preset Suggestions
+    st.markdown("**Suggested Engineering Inquiries:**")
+    preset_cols = st.columns(3)
+    preset_q = None
+    with preset_cols[0]:
+        if st.button("Identify port receiving VehicleSpeed"):
+            preset_q = "Identify the port receiving VehicleSpeed and the component it belongs to."
+    with preset_cols[1]:
+        if st.button("Which SWC calculates brake pressure?"):
+            preset_q = "Which software component calculates target brake pressure and what are its interfaces?"
+    with preset_cols[2]:
+        if st.button("Diagnostic trigger at 1.4g deceleration"):
+            preset_q = "What diagnostic action occurs if deceleration exceeds 1.4g without pressure build-up?"
 
-                            st.markdown(
-                                f"""
-**Source {source.get('source_id')}**
+    default_q = preset_q or "Identify the port receiving VehicleSpeed."
+    user_query = st.text_input("Engineering Query:", value=default_q)
 
-- File: `{source.get('filename')}`
-- Page: `{source.get('page_number')}`
-- Section: `{source.get('section')}`
-- Entity: `{source.get('entity_name')}`
-- Distance: `{source.get('distance')}`
-"""
-                            )
+    col_q1, col_q2 = st.columns([1, 4])
+    with col_q1:
+        top_k_val = st.slider("Context Chunks (top_k)", 1, 8, 4)
 
-                            st.code(
-                                source.get(
-                                    "content",
-                                    ""
-                                )
-                            )
+    if st.button("Execute Tracing Query", type="primary"):
+        if not user_query.strip():
+            st.warning("Please enter a query.")
+        else:
+            with st.spinner("Retrieving semantic context from ChromaDB and reasoning via Ollama (llama3.2)..."):
+                rag_res = client.query_rag(
+                    question=user_query,
+                    project_id=selected_project_id,
+                    document_id=None,
+                    top_k=top_k_val,
+                )
 
+                st.markdown("### Grounded Response")
+                st.markdown(rag_res.get("answer", "No response generated."))
 
-# ============================================================
-# PAGE 5 — COMPARE HLD
-# ============================================================
+                # Metadata bar
+                c_meta1, c_meta2, c_meta3 = st.columns(3)
+                c_meta1.caption(f"⏱️ **Latency:** {rag_res.get('latency_seconds', 0.0)}s")
+                c_meta2.caption(f"🧠 **Model:** {rag_res.get('model_used', 'Ollama')}")
+                confidence = rag_res.get("grounding_confidence", "High")
+                c_meta3.caption(f"🎯 **Grounding Confidence:** {confidence}")
 
-elif page == "⚖️ Compare HLD Versions":
+                # Citations
+                st.markdown("#### Evidence & Source Citations")
+                citations = rag_res.get("citations", [])
+                if citations:
+                    for cit in citations:
+                        render_citation(cit)
+                else:
+                    st.info("No citations retrieved.")
 
-    st.header("⚖️ Compare HLD Versions")
+# ----------------- TAB 4: ENTITY EXPLORER -----------------
+with tab_entities:
+    st.subheader("Cataloged AUTOSAR Architecture Entities")
+    
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1:
+        type_filter = st.selectbox(
+            "Filter Entity Type",
+            options=["All", "Component", "Port", "Interface", "Signal"],
+        )
+    with col_f2:
+        search_query = st.text_input("Search Entity Name", placeholder="e.g. SpeedProcessingSWC")
+    with col_f3:
+        doc_filter = st.selectbox(
+            "Filter Document",
+            options=[None] + documents,
+            format_func=lambda d: "All Documents" if d is None else f"{d['filename']} ({d['version']})",
+        )
 
-    documents = (
-        st.session_state.uploaded_documents
+    filt_type = None if type_filter == "All" else type_filter
+    filt_doc_id = doc_filter["id"] if doc_filter else None
+
+    entities_data = client.get_entities(
+        document_id=filt_doc_id,
+        project_id=selected_project_id,
+        entity_type=filt_type,
+        search=search_query if search_query.strip() else None,
     )
+
+    if entities_data:
+        ent_df = pd.DataFrame(
+            [
+                {
+                    "Type": e["entity_type"],
+                    "Name": e["name"],
+                    "Parent Component": e["parent_component"] or "N/A",
+                    "Port Direction": e["port_type"] or "N/A",
+                    "Interface": e["interface_name"] or "N/A",
+                    "Data Type": e["data_type"] or "N/A",
+                    "Source Page": e["source_page"],
+                    "Section": e["section_title"],
+                }
+                for e in entities_data
+            ]
+        )
+        st.dataframe(ent_df, use_container_width=True)
+
+        csv = ent_df.to_csv(index=False).encode("utf-8")
+        st.download_button("Export Entities to CSV", csv, "autosar_entities.csv", "text/csv")
+    else:
+        st.info("No matching AUTOSAR entities found.")
+
+# ----------------- TAB 5: REVISION DIFF -----------------
+with tab_diff:
+    st.subheader("Architectural Revision Comparison (HLD Diff Engine)")
+    st.caption("Compare two HLD revisions to identify added, modified, and removed components, ports, and signals.")
 
     if len(documents) < 2:
-
-        st.warning(
-            "Upload at least two HLD versions "
-            "to compare them."
-        )
-
+        st.warning("At least two document revisions are required for comparison. Ingest or load v2.0 and v2.1 from the sidebar.")
     else:
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            doc_a = st.selectbox("Baseline Revision (Version A)", options=documents, index=0, format_func=lambda d: f"{d['filename']} ({d['version']})")
+        with col_d2:
+            doc_b = st.selectbox("Target Revision (Version B)", options=documents, index=1 if len(documents) > 1 else 0, format_func=lambda d: f"{d['filename']} ({d['version']})")
 
-        document_options = {
-            document["filename"]:
-            document["document_id"]
-            for document in documents
-        }
+        if doc_a["id"] == doc_b["id"]:
+            st.info("Select two distinct document versions to compute the architectural delta.")
+        else:
+            if st.button("Run Revision Diff", type="primary"):
+                with st.spinner("Computing delta across architectural entities..."):
+                    diff_res = client.compare_revisions(doc_a["id"], doc_b["id"])
 
-        old_filename = st.selectbox(
-            "Old HLD Version",
-            list(document_options.keys()),
-            key="old_document"
-        )
+                    summary = diff_res.get("summary", {})
+                    c_s1, c_s2, c_s3, c_s4 = st.columns(4)
+                    c_s1.metric("Added Entities", summary.get("added", 0))
+                    c_s2.metric("Modified Entities", summary.get("modified", 0))
+                    c_s3.metric("Removed Entities", summary.get("removed", 0))
+                    c_s4.metric("Unchanged Entities", summary.get("unchanged", 0))
 
-        new_filename = st.selectbox(
-            "New HLD Version",
-            list(document_options.keys()),
-            key="new_document"
-        )
+                    st.markdown("#### Architectural Delta Log")
+                    for note in diff_res.get("architectural_notes", []):
+                        st.markdown(f"- {note}")
 
-        if st.button(
-            "⚖️ Compare Versions",
-            type="primary"
-        ):
-
-            if old_filename == new_filename:
-
-                st.error(
-                    "Old and new HLD must be different."
-                )
-
-            else:
-
-                with st.spinner(
-                    "Comparing HLD versions..."
-                ):
-
-                    result = compare_documents(
-                        document_options[
-                            old_filename
-                        ],
-                        document_options[
-                            new_filename
-                        ]
-                    )
-
-                if result:
-
-                    comparison = result.get(
-                        "comparison",
-                        {}
-                    )
-
-                    for entity_type, data in comparison.items():
-
-                        st.subheader(
-                            entity_type.replace(
-                                "_",
-                                " "
-                            ).title()
+                    st.markdown("#### Detailed Entity Comparison")
+                    diff_items = diff_res.get("diff_items", [])
+                    if diff_items:
+                        diff_df = pd.DataFrame(
+                            [
+                                {
+                                    "Status": item["status"],
+                                    "Type": item["entity_type"],
+                                    "Name": item["name"],
+                                    "Details": str(item["details"]),
+                                }
+                                for item in diff_items
+                            ]
                         )
+                        st.dataframe(diff_df, use_container_width=True)
 
-                        summary = data.get(
-                            "summary",
-                            {}
-                        )
+# ----------------- TAB 6: VALIDATION -----------------
+with tab_validate:
+    st.subheader("Architectural Consistency & Inconsistency Checks")
+    st.caption("Heuristic static verification for unassigned ports, dangling signals, and data type mismatches.")
 
-                        col1, col2, col3, col4 = (
-                            st.columns(4)
-                        )
-
-                        with col1:
-
-                            st.metric(
-                                "Added",
-                                summary.get(
-                                    "added",
-                                    0
-                                )
-                            )
-
-                        with col2:
-
-                            st.metric(
-                                "Removed",
-                                summary.get(
-                                    "removed",
-                                    0
-                                )
-                            )
-
-                        with col3:
-
-                            st.metric(
-                                "Changed",
-                                summary.get(
-                                    "changed",
-                                    0
-                                )
-                            )
-
-                        with col4:
-
-                            st.metric(
-                                "Unchanged",
-                                summary.get(
-                                    "unchanged",
-                                    0
-                                )
-                            )
-
-                        if data.get("added"):
-
-                            with st.expander(
-                                "➕ Added"
-                            ):
-
-                                st.json(
-                                    data["added"]
-                                )
-
-                        if data.get("removed"):
-
-                            with st.expander(
-                                "➖ Removed"
-                            ):
-
-                                st.json(
-                                    data["removed"]
-                                )
-
-                        if data.get("changed"):
-
-                            with st.expander(
-                                "🔄 Changed"
-                            ):
-
-                                st.json(
-                                    data["changed"]
-                                )
-
-
-# ============================================================
-# PAGE 6 — VALIDATION
-# ============================================================
-
-elif page == "⚠️ Validation":
-
-    st.header(
-        "⚠️ HLD Validation & Inconsistency Detection"
-    )
-
-    if not st.session_state.document_id:
-
-        st.warning(
-            "Upload an HLD document first."
-        )
-
+    if not documents:
+        st.info("Ingest an HLD specification first to run verification.")
     else:
+        target_doc = st.selectbox("Select Specification to Validate", options=documents, format_func=lambda d: f"{d['filename']} ({d['version']})")
 
-        if st.button(
-            "🔎 Run Validation",
-            type="primary"
-        ):
+        if st.button("Execute Architectural Validation", type="primary"):
+            with st.spinner("Analyzing component interfaces and port bindings..."):
+                val_res = client.validate_document(target_doc["id"])
 
-            with st.spinner(
-                "Checking HLD for inconsistencies..."
-            ):
-
-                result = validate_document(
-                    st.session_state.document_id
-                )
-
-            if result:
-
-                validation = result.get(
-                    "validation",
-                    {}
-                )
-
-                total_issues = validation.get(
-                    "total_issues",
-                    0
-                )
-
-                severity_summary = validation.get(
-                    "severity_summary",
-                    {}
-                )
-
-                st.subheader(
-                    "Validation Summary"
-                )
-
-                col1, col2, col3, col4 = (
-                    st.columns(4)
-                )
-
-                with col1:
-
-                    st.metric(
-                        "Total Issues",
-                        total_issues
-                    )
-
-                with col2:
-
-                    st.metric(
-                        "🔴 High",
-                        severity_summary.get(
-                            "HIGH",
-                            0
-                        )
-                    )
-
-                with col3:
-
-                    st.metric(
-                        "🟠 Medium",
-                        severity_summary.get(
-                            "MEDIUM",
-                            0
-                        )
-                    )
-
-                with col4:
-
-                    st.metric(
-                        "🟢 Low",
-                        severity_summary.get(
-                            "LOW",
-                            0
-                        )
-                    )
-
-                st.divider()
-
-                issues = validation.get(
-                    "issues",
-                    []
-                )
-
-                if not issues:
-
-                    st.success(
-                        "No inconsistencies detected."
-                    )
-
+                passed = val_res.get("passed_audit", False)
+                if passed:
+                    st.success("✅ Specification Passed Architecture Audit: No critical unassigned ports or type conflicts detected.")
                 else:
+                    st.error(f"❌ Verification Warnings Detected ({val_res.get('critical_count', 0)} Critical, {val_res.get('warning_count', 0)} Warnings)")
 
-                    st.subheader(
-                        "Detected Issues"
-                    )
+                v1, v2, v3, v4 = st.columns(4)
+                v1.metric("Total Issues", val_res.get("total_issues", 0))
+                v2.metric("Critical", val_res.get("critical_count", 0))
+                v3.metric("Warnings", val_res.get("warning_count", 0))
+                v4.metric("Advisories (Info)", val_res.get("info_count", 0))
 
-                    for index, issue in enumerate(
-                        issues,
-                        start=1
-                    ):
-
-                        severity = issue.get(
-                            "severity",
-                            "UNKNOWN"
+                issues = val_res.get("issues", [])
+                if issues:
+                    st.markdown("#### Identified Inconsistencies")
+                    for issue in issues:
+                        severity = issue["severity"]
+                        badge = "badge-critical" if severity == "CRITICAL" else ("badge-warning" if severity == "WARNING" else "badge-component")
+                        st.markdown(
+                            f"""
+                            <div class="card-container">
+                                <span class="{badge}">{severity}</span> &nbsp;
+                                <b>{issue['category']}:</b> <code>{issue['entity_name']}</code> 
+                                (Component: <b>{issue.get('component_name', 'N/A')}</b> | Page: <b>{issue['page']}</b>)
+                                <p style="margin-top: 6px; margin-bottom: 4px;">{issue['description']}</p>
+                                <p style="color: #1E40AF; font-size: 0.9rem; margin-bottom: 0;"><b>Remediation:</b> {issue['recommendation']}</p>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
                         )
-
-                        issue_type = issue.get(
-                            "type",
-                            "UNKNOWN"
-                        )
-
-                        with st.expander(
-                            f"{index}. "
-                            f"{severity} — "
-                            f"{issue_type}"
-                        ):
-
-                            st.write(
-                                issue.get(
-                                    "message",
-                                    ""
-                                )
-                            )
-
-                            st.json(issue)
+                else:
+                    st.info("No architectural warnings found in this document revision.")
